@@ -38,68 +38,104 @@ import java.nio.ByteBuffer;
 
 public class UndertowWebsocket {
 
-    protected WebSocketConnectionCallback callback(final WebsocketInitHandler checker) {
-        return new WebSocketConnectionCallback() {
-            public void onConnect (WebSocketHttpExchange exchange, WebSocketChannel channel) {
-                final DelegatingUndertowEndpoint endpoint = new DelegatingUndertowEndpoint();
-                if (checker.shouldConnect(exchange, endpoint)) {
-                    endpoint.onOpen(channel, exchange);
-                    channel.addCloseTask(new ChannelListener<WebSocketChannel>() {
-                        @Override
-                        public void handleEvent(WebSocketChannel channel) {
-                            endpoint.onClose(channel, new CloseMessage(CloseMessage.GOING_AWAY, null));
-                        }
-                    });
-                    channel.getReceiveSetter().set(new AbstractReceiveListener() {
-                        protected void onError (WebSocketChannel channel, Throwable error) {
-                            endpoint.onError(channel, error);
-                        }
-                        protected void onCloseMessage (CloseMessage message, WebSocketChannel channel) {
-                            endpoint.onClose(channel, message);
-                        }
-                        protected void onFullTextMessage (WebSocketChannel channel, BufferedTextMessage message) {
-                            endpoint.onMessage(channel, message.getData());
-                        }
-                        protected void onFullBinaryMessage (WebSocketChannel channel, BufferedBinaryMessage message) {
-                            Pooled<ByteBuffer[]> pooled = message.getData();
-                            try {
-                                ByteBuffer[] payload = pooled.getResource();
-                                endpoint.onMessage(channel, toArray(payload));
-                            } finally {
-                                pooled.free();
-                            }
-                        }
-                    });
-                    channel.resumeReceives();
-                } else {
-                    try {
-                        channel.close();
-                    } catch (IOException e) {
-                        throw new RuntimeException("Error closing websocket", e);
-                    }
-                }
-            }
-        };
+    class CloseListener implements ChannelListener<WebSocketChannel> {
+        private DelegatingUndertowEndpoint endpoint;
+
+        public CloseListener(DelegatingUndertowEndpoint endpoint) {
+            this.endpoint = endpoint;
+        }
+
+        @Override
+        public void handleEvent(WebSocketChannel channel) {
+            endpoint.onClose(channel,
+                             new CloseMessage(CloseMessage.GOING_AWAY, null));
+        }
     }
 
-    protected HttpHandler downstream(final HttpHandler next) {
+    class ReceiveListener extends AbstractReceiveListener {
+        private DelegatingUndertowEndpoint endpoint;
+
+        public ReceiveListener(DelegatingUndertowEndpoint endpoint) {
+            this.endpoint = endpoint;
+        }
+
+        protected void onError (WebSocketChannel channel, Throwable error) {
+            endpoint.onError(channel, error);
+        }
+        protected void onCloseMessage (CloseMessage message,
+                                       WebSocketChannel channel) {
+            endpoint.onClose(channel, message);
+        }
+        protected void onFullTextMessage (WebSocketChannel channel,
+                                          BufferedTextMessage message) {
+            endpoint.onMessage(channel, message.getData());
+        }
+        protected void onFullBinaryMessage (WebSocketChannel channel,
+                                            BufferedBinaryMessage message) {
+            Pooled<ByteBuffer[]> pooled = message.getData();
+            try {
+                ByteBuffer[] payload = pooled.getResource();
+                endpoint.onMessage(channel, toArray(payload));
+            } finally {
+                pooled.free();
+            }
+        }
+    }
+
+    class Callback implements WebSocketConnectionCallback {
+        private WebsocketInitHandler checker;
+
+        public Callback(WebsocketInitHandler checker) {
+            this.checker = checker;
+        }
+
+        public void onConnect (WebSocketHttpExchange exchange,
+                               WebSocketChannel channel) {
+
+            final DelegatingUndertowEndpoint endpoint =
+                new DelegatingUndertowEndpoint();
+
+            if (checker.shouldConnect(exchange, endpoint)) {
+                endpoint.onOpen(channel, exchange);
+                channel.addCloseTask(new CloseListener(endpoint));
+                channel.getReceiveSetter().set(new ReceiveListener(endpoint));
+                channel.resumeReceives();
+            } else {
+                try {
+                    channel.close();
+                } catch (IOException e) {
+                    throw new RuntimeException("Error closing websocket", e);
+                }
+            }
+        }
+    };
+
+    protected HttpHandler downstream (final HttpHandler next) {
         return next==null ? ResponseCodeHandler.HANDLE_404 : next;
     }
 
-    protected WebSocketProtocolHandshakeHandler handshake(final WebSocketConnectionCallback callback,
-                                                          final HttpHandler next) {
+    protected WebSocketProtocolHandshakeHandler
+        handshake (final WebSocketConnectionCallback callback,
+                   final HttpHandler next) {
+
         HttpHandler downstream = next==null ? ResponseCodeHandler.HANDLE_404 : next;
         return new WebSocketProtocolHandshakeHandler(callback, downstream(next));
     }
 
-    protected HttpHandler httpHandler(final HttpHandler wsHandler,
-                                      final ThreadLocal<HttpServerExchange> requestTL,
-                                      final HttpHandler next) {
+    protected HttpHandler
+        httpHandler (final HttpHandler wsHandler,
+                     final ThreadLocal<HttpServerExchange> requestTL,
+                     final HttpHandler next) {
+
         return new HttpHandler() {
             @Override
             public void handleRequest(HttpServerExchange exchange) throws Exception {
-                HeaderValues upgrade = exchange.getRequestHeaders().get(Headers.UPGRADE);
-                if (upgrade != null && "websocket".equalsIgnoreCase(upgrade.peek())) {
+                HeaderValues upgrade =
+                    exchange.getRequestHeaders().get(Headers.UPGRADE);
+
+                if (upgrade != null &&
+                    "websocket".equalsIgnoreCase(upgrade.peek())) {
+
                     requestTL.set(exchange);
                     try {
                         wsHandler.handleRequest(exchange);
@@ -113,10 +149,11 @@ public class UndertowWebsocket {
         };
     }
 
-    protected HttpHandler handler(final ThreadLocal<HttpServerExchange> requestTL,
-                                  final WebsocketInitHandler checker,
-                                  final HttpHandler next) {
-        WebSocketConnectionCallback callback = callback(checker);
+    protected HttpHandler handler (final ThreadLocal<HttpServerExchange> requestTL,
+                                   final WebsocketInitHandler checker,
+                                   final HttpHandler next) {
+
+        WebSocketConnectionCallback callback = new Callback(checker);
         HttpHandler wsHandler = handshake(callback, next);
         return httpHandler(wsHandler, requestTL, next);
     }
@@ -137,9 +174,11 @@ public class UndertowWebsocket {
         return data;
     }
 
-    public static HttpHandler createHandler(final ThreadLocal<HttpServerExchange> requestTL,
-                                            final WebsocketInitHandler checker,
-                                            final HttpHandler next) {
+    public static HttpHandler
+        createHandler (final ThreadLocal<HttpServerExchange> requestTL,
+                       final WebsocketInitHandler checker,
+                       final HttpHandler next) {
+
         return (new UndertowWebsocket()).handler(requestTL, checker, next);
     }
 }

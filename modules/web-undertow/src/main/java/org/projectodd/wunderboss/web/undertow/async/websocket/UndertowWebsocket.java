@@ -36,13 +36,10 @@ import org.xnio.Pooled;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
-
 public class UndertowWebsocket {
 
-    public static HttpHandler createHandler(final ThreadLocal<HttpServerExchange> requestTL,
-                                            final WebsocketInitHandler checker,
-                                            final HttpHandler next) {
-        WebSocketConnectionCallback callback = new WebSocketConnectionCallback() {
+    protected WebSocketConnectionCallback callback(final WebsocketInitHandler checker) {
+        return new WebSocketConnectionCallback() {
             public void onConnect (WebSocketHttpExchange exchange, WebSocketChannel channel) {
                 final DelegatingUndertowEndpoint endpoint = new DelegatingUndertowEndpoint();
                 if (checker.shouldConnect(exchange, endpoint)) {
@@ -83,11 +80,21 @@ public class UndertowWebsocket {
                 }
             }
         };
+    }
 
-        final HttpHandler downstream = next==null ? ResponseCodeHandler.HANDLE_404 : next;
-        final HttpHandler wsHandler = new WebSocketProtocolHandshakeHandler(callback, downstream);
+    protected HttpHandler downstream(final HttpHandler next) {
+        return next==null ? ResponseCodeHandler.HANDLE_404 : next;
+    }
 
+    protected WebSocketProtocolHandshakeHandler handshake(final WebSocketConnectionCallback callback,
+                                                          final HttpHandler next) {
+        HttpHandler downstream = next==null ? ResponseCodeHandler.HANDLE_404 : next;
+        return new WebSocketProtocolHandshakeHandler(callback, downstream(next));
+    }
 
+    protected HttpHandler httpHandler(final HttpHandler wsHandler,
+                                      final ThreadLocal<HttpServerExchange> requestTL,
+                                      final HttpHandler next) {
         return new HttpHandler() {
             @Override
             public void handleRequest(HttpServerExchange exchange) throws Exception {
@@ -100,16 +107,22 @@ public class UndertowWebsocket {
                         requestTL.remove();
                     }
                 } else {
-                    downstream.handleRequest(exchange);
+                    downstream(next).handleRequest(exchange);
                 }
             }
         };
+    }
 
-
+    protected HttpHandler handler(final ThreadLocal<HttpServerExchange> requestTL,
+                                  final WebsocketInitHandler checker,
+                                  final HttpHandler next) {
+        WebSocketConnectionCallback callback = callback(checker);
+        HttpHandler wsHandler = handshake(callback, next);
+        return httpHandler(wsHandler, requestTL, next);
     }
 
     // Lifted from Undertow's FrameHandler.java
-    protected static byte[] toArray(ByteBuffer... payload) {
+    protected byte[] toArray(ByteBuffer... payload) {
         if (payload.length == 1) {
             ByteBuffer buf = payload[0];
             if (buf.hasArray() && buf.arrayOffset() == 0 && buf.position() == 0) {
@@ -122,5 +135,11 @@ public class UndertowWebsocket {
             buf.get(data);
         }
         return data;
+    }
+
+    public static HttpHandler createHandler(final ThreadLocal<HttpServerExchange> requestTL,
+                                            final WebsocketInitHandler checker,
+                                            final HttpHandler next) {
+        return (new UndertowWebsocket()).handler(requestTL, checker, next);
     }
 }
